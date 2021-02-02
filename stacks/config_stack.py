@@ -22,11 +22,15 @@ class ConfigStack(core.Stack):
       config_rule_name="bad-policy-rule",
       lambda_function=config_badpol_lambda_function,
       configuration_changes=True,
+      periodic=True,
+      maximum_execution_frequency=config.MaximumExecutionFrequency.ONE_HOUR,
       input_parameters={
         'WhiteUsers': '["kevin","user2"]',
         'WhiteGroups': '["group1","group2"]',
         'WhiteRoles': '["role1","role2"]',
-        'WhitePolicies': '["NotFullAccess","NotAdminAccess"]'
+        'WhitePolicies': '["NotFullAccess","NotAdminAccess"]',
+        'BadPolicies': '["AdministratorAccess","PowerUserAccess","AmazonEC2RoleforSSM","ReadOnlyAccess"]',
+        'NoFullAccess': 'True'
       },
       rule_scope=config.RuleScope.from_resources([
         config.ResourceType.IAM_USER,

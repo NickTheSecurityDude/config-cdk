@@ -23,11 +23,11 @@ class LambdaStack(core.Stack):
 
     # create the config bad policy checker Lambda function
     self._config_badpol_lambda_function=lambda_.Function(self,"Config Bad Pol Lambda Func",
-      code=lambda_.Code.from_asset("lambda/"),
+      code=lambda_.Code.from_asset("lambda/config_bad_policy_checker.zip"),
       handler="config_bad_policy_checker.lambda_handler",
       runtime=lambda_.Runtime.PYTHON_3_8,
       role=config_badpol_lambda_role,
-      timeout=core.Duration.seconds(60)
+      timeout=core.Duration.seconds(180)
     )
 
   # Exports

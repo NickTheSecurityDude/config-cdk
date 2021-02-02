@@ -9,6 +9,61 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for
 # the specific language governing permissions and limitations under the License.
 
+'''
+#####################################
+##           Gherkin               ##
+#####################################
+Rule Name:
+  bad-policy-rule
+Description:
+  Check for overly permissive policies.
+Trigger:
+  Periodic
+  Configuration Change on AWS::IAM::User, AWS::IAM::Group, or AWS::IAM::Role
+Reports on:
+  AWS::IAM::User, AWS::IAM::Group, and AWS::IAM::Role
+Parameters:
+  | ----------------------|-----------|--------------------------------------------------------------|
+  | Parameter Name        | Type      | Description                                                  |
+  | ----------------------|-----------|------------------------------------------------------------- |
+  | WhiteUsers            | Optional  | List of users you don't want to check                        |
+  | ----------------------|-----------|------------------------------------------------------------- |
+  | WhiteGroups           | Optional  | List of groups you don't want to check                       |
+  | ----------------------|-----------|------------------------------------------------------------- |
+  | WhiteRoles            | Optional  | List of roles you don't want to check                        |
+  | ----------------------|-----------|------------------------------------------------------------- |
+  | WhitePolicies         | Optional  | List of policies you want to mark as safe                    |
+  | ----------------------|-----------|------------------------------------------------------------- |
+  | BadPolicies           | Optional  | List of policies considered bad                              |
+  | ----------------------|-----------|------------------------------------------------------------- |
+  | NoFullAccess          | Required  | True/False  - to block poclicies with FullAccess in the name |
+  | ----------------------|-----------|------------------------------------------------------------- |
+
+Feature:
+    In order to: to help enforce least privilege
+             As: a Security Officer
+         I want: to try to ensure that policies do not allow excessive permissions.
+        
+Scenarios:
+    Scenario 1:
+      Given: one or more parameters are not valid
+       Then: return ERROR
+    Scenario 2:
+      Given: principal (user, group or role) is whitelisted
+       Then: return NOT_APPLICABLE
+    Scenario 3:
+      Given: a "bad policy" is found.
+       Then: return NON_COMPLIANT
+    Scenario 4:
+      Given: a full access policy is found
+        And: the parameter "NoFullAccess" is set to True
+       Then: return NON_COMPLIANT
+    Scenario 5:
+      Given: the above checks have not returned anything
+       Then: return COMPLIANT
+'''
+
+
 import json
 import sys
 import datetime
@@ -33,54 +88,63 @@ ASSUME_ROLE_MODE = False
 # Other parameters (no change needed)
 CONFIG_ROLE_TIMEOUT_SECONDS = 900
 
+####################
+# Global Variables #
+####################
+
+iam_client = boto3.client('iam')
+
+evaluations=[]
+
 #############
-# Main Code #
+# Functions #
 #############
 
-def evaluate_compliance(event, configuration_item, valid_rule_parameters):
+# Function to check compliance of policies attached to principal
+def check_iam_compliance(_principal,_resource_type,__event):
+  if DEBUG:
+    print("Event (Line 106):",__event)
 
   # parse config parameters    
-  white_users=json.loads(event['ruleParameters'])['WhiteUsers']
-  white_groups=json.loads(event['ruleParameters'])['WhiteGroups']
-  white_roles=json.loads(event['ruleParameters'])['WhiteRoles']
-  white_policies=json.loads(event['ruleParameters'])['WhitePolicies']
-  
-  resource_type=configuration_item['resourceType']
-  principal=configuration_item['resourceName']
-  print(resource_type,principal)
+  white_users=json.loads(__event['ruleParameters'])['WhiteUsers']
+  white_groups=json.loads(__event['ruleParameters'])['WhiteGroups']
+  white_roles=json.loads(__event['ruleParameters'])['WhiteRoles']
+  white_policies=json.loads(__event['ruleParameters'])['WhitePolicies']
+  bad_policies=json.loads(__event['ruleParameters'])['BadPolicies']
+  no_full_access=json.loads(__event['ruleParameters'])['NoFullAccess']
   
   whitelisted=0
 
-  iam_client = boto3.client('iam')
-
   # set bad policies here
-  bad_policies=['AdministratorAccess','PowerUserAccess','AmazonEC2RoleforSSM']
+  # moved to a parameter
+  #['AdministratorAccess','PowerUserAccess','AmazonEC2RoleforSSM','*FullAccess*']
   # plus *FullAccess*
 
-  # get attached policies
-  if resource_type=="AWS::IAM::User":
+  # get attached policies and check if principal is whitelisted
+  if _resource_type=="AWS::IAM::User":
     response = iam_client.list_attached_user_policies(
-      UserName=principal,
+      UserName=_principal,
     )
-    print(white_users)
-    if principal in white_users:
+    if DEBUG:
+      print("White Users:",white_users)
+    if _principal in white_users:
       whitelisted=1
-  elif resource_type=="AWS::IAM::Group":
+  elif _resource_type=="AWS::IAM::Group":
     response = iam_client.list_attached_group_policies(
-      GroupName=principal,
+      GroupName=_principal,
     )
-    if principal in white_groups:
+    if _principal in white_groups:
       whitelisted=1
   else:
     response = iam_client.list_attached_role_policies(
-      RoleName=principal,
+      RoleName=_principal,
     )
-    if principal in white_roles:
+    if _principal in white_roles:
       whitelisted=1
     
   attached_policies=response['AttachedPolicies']
 
-  compliant=1
+  compliant="COMPLIANT"
 
   # check if attached policy is bad
   if whitelisted==0:
@@ -88,24 +152,134 @@ def evaluate_compliance(event, configuration_item, valid_rule_parameters):
       policy=policy_obj['PolicyName']
       if policy not in white_policies:
         if policy in bad_policies:
-          print("Bad Policy Found",policy)
-          compliant=0
-        elif "FullAccess" in policy:
-          print("Bad Policy Found (FullAccess)",policy)
-          compliant=0
+          if DEBUG:
+            print("Bad Policy Found",policy)
+          compliant="NON_COMPLIANT"
+        elif "FullAccess" in policy and no_full_access:
+          if DEBUG:
+            print("Bad Policy Found (FullAccess)",policy)
+          compliant="NON_COMPLIANT"
         else:
           print("Policy is OK",policy)
   else:
-    print(principal,"is white listed.")
+    print(_principal,"is white listed.")
+    compliant="NOT_APPLICABLE"
       
-
-  print("Compliant:",compliant)
+  if DEBUG:
+    print("Compliant:",compliant)
   
-  # return compliant or not compliant≈
-  if compliant == 1:
-    return "COMPLIANT"
+  # return compliant status
+  return compliant
+
+# If its a periodic run, paginate the results
+def paginate_iam(_iam_type,_event,_configuration_item):
+  if DEBUG:
+    print("Checking:",_iam_type)
+  p = iam_client.get_paginator(_iam_type)
+  paginator=p.paginate()
+  for page in paginator:
+    #print(page)
+    if _iam_type=='list_groups':
+      for group in page['Groups']:
+        if DEBUG:
+          print("Group (Line 185):",group)
+        principal=group['GroupName']
+        resource_type="AWS::IAM::Group"
+        # check compliance of principal
+        compliance=check_iam_compliance(principal,resource_type,_event)
+        group_id=group['GroupId']
+        if DEBUG:
+          print("Config Item (Line 192):",_configuration_item)
+        # add results to evaluations array
+        evaluations.append(build_evaluation(group_id, compliance, _event, resource_type,annotation=principal))
+        if DEBUG:
+          print("Principal/ResourceType (Line 196)",principal,resource_type)
+    elif _iam_type=='list_users':
+      for user in page['Users']:
+        if DEBUG:
+          print("User (Line 200):",user)
+        principal=user['UserName']
+        resource_type="AWS::IAM::User"
+        # check compliance of principal
+        compliance=check_iam_compliance(principal,resource_type,_event)
+        user_id=user['UserId']
+        if DEBUG:
+          print("Config Item (Line 207):",_configuration_item)
+        # add results to evaluations array
+        evaluations.append(build_evaluation(user_id, compliance, _event, resource_type,annotation=principal))
+        if DEBUG:
+          print("Principal/ResourceType (Line 211)",principal,resource_type)
+    else:
+      for role in page['Roles']:
+        if DEBUG:
+          print("Role (Line 215):",role)
+        principal=role['RoleName']
+        resource_type="AWS::IAM::Role"
+        # check compliance of principal
+        compliance=check_iam_compliance(principal,resource_type,_event)
+        role_id=role['RoleId']
+        if DEBUG:
+          print("Config Item (Line 222):",_configuration_item)
+        # add results to evaluations array
+        evaluations.append(build_evaluation(role_id, compliance, _event, resource_type,annotation=principal))
+        if DEBUG:
+          print("Principal/ResourceType (Line 226)",principal,resource_type)
+    
+  return 1
+
+#############
+# Main Code #
+#############
+
+# Note: extra debugging added due to possible bug in AWS console
+DEBUG=0
+
+def evaluate_compliance(event, configuration_item, valid_rule_parameters):
+
+  if DEBUG:
+    print("Event (Line 240):",event)
+
+  # check if this is a period run (loop through all users, groups, and roles) or a run based on a change      
+  try:
+    periodic_test=json.loads(event['invokingEvent'])['configurationItem']
+    periodic=0
+    if DEBUG:
+      print("Configuration Change Run")
+  except Exception as e:
+    if DEBUG:
+      print(e)
+      print("Periodic Run")
+    periodic=1
+
+  if periodic:
+    
+    # loop through each type of IAM user
+    iam_types=['list_groups','list_users','list_roles']
+    for iam_type in iam_types:
+      paginate_iam(iam_type,event,configuration_item)
+
+    # return the array of all IAM principals
+    return evaluations
+
   else:
-    return "NON_COMPLIANT"
+    # if single run check just the one principal (get it from the configuration item)
+    resource_type=configuration_item['resourceType']
+    principal=configuration_item['resourceName']
+    if DEBUG:
+      print("Resource Type/Principal:",resource_type,principal)
+    return check_iam_compliance(principal,resource_type,event)
+
+# Function to make sure list parameters are a list and contain only stirngs
+def check_parameter_list(param,p_type):
+  if param != '':
+    if type(param) is not list:
+      raise ValueError(p_type+' needs to be a list.')
+    for param_item in param:
+      if type(param_item) is not str:
+        raise ValueError('you entered: '+param_item+' only strings may be in the '+p_type)
+
+  # if function didn't raise an error to stop the program, return 1
+  return 1
 
 def evaluate_parameters(rule_parameters):
     """Evaluate the rule parameters dictionary validity. Raise a ValueError for invalid parameters.
@@ -116,10 +290,48 @@ def evaluate_parameters(rule_parameters):
     Keyword arguments:
     rule_parameters -- the Key/Value dictionary of the Config Rules parameters
     """
+    # print parameters if in DEBUG mode
+    if DEBUG:
+      print("eval_param rp:",rule_parameters)
+      print("eval_param wu:",rule_parameters['WhiteUsers'])
+      print("eval_param wu json:",json.loads(rule_parameters['WhiteUsers']))
+      print("eval_param wg json:",json.loads(rule_parameters['WhiteGroups']))
+      print("eval_param wr json:",json.loads(rule_parameters['WhiteRoles']))
+      print("eval_param wp json:",json.loads(rule_parameters['WhitePolicies']))
+      print("eval_param bp json:",json.loads(rule_parameters['BadPolicies']))
+      print("eval_param nfa:",rule_parameters['NoFullAccess'])
+      #print("eval_param nfa json:",json.loads(rule_parameters['NoFullAccess']))
+
+    if rule_parameters:
+      # check list parameters
+      list_params=['WhiteUsers','WhiteGroups','WhiteRoles','WhitePolicies','BadPolicies']
+      if DEBUG:
+        print("Checking list params...")
+        print(list_params)
+    
+      for list_param in list_params:
+        if DEBUG:
+          print("Checking Param (Line 314):")
+          print("lp:",list_param)
+          print("rp/lp",rule_parameters[list_param])
+        check_parameter_list(json.loads(rule_parameters[list_param]),list_param)
+
+      # check bool parameter
+      no_full_access=rule_parameters['NoFullAccess']
+      if DEBUG:
+        print("Checking boolean (Line 322)")
+        print(type(no_full_access))
+      if not (no_full_access=='True' or no_full_access=='False'):
+        raise ValueError('NoFullAccess parameter needs to be True or False (no quotes).')
+    else:
+      print("rule_parameters is False")
+
     valid_rule_parameters = rule_parameters
+    if DEBUG:
+      print("Existing evaluate_parameters")
+      
     return valid_rule_parameters
 
-####################
 # Helper Functions #
 ####################
 
@@ -346,9 +558,13 @@ def lambda_handler(event, context):
 
     global AWS_CONFIG_CLIENT
 
-    #print(event)
+    if DEBUG:
+      print("Event (Line 562):",event)
     check_defined(event, 'event')
+
+    # this should only error if you test the lambda function with invalid json
     invoking_event = json.loads(event['invokingEvent'])
+    
     rule_parameters = {}
     if 'ruleParameters' in event:
         rule_parameters = json.loads(event['ruleParameters'])
@@ -363,6 +579,7 @@ def lambda_handler(event, context):
         if invoking_event['messageType'] in ['ConfigurationItemChangeNotification', 'ScheduledNotification', 'OversizedConfigurationItemChangeNotification']:
             configuration_item = get_configuration_item(invoking_event)
             if is_applicable(configuration_item, event):
+                print("configuration item (Line 582)",configuration_item)
                 compliance_result = evaluate_compliance(event, configuration_item, valid_rule_parameters)
             else:
                 compliance_result = "NOT_APPLICABLE"
@@ -441,4 +658,3 @@ def build_error_response(internal_error_message, internal_error_details=None, cu
     }
     print(error_response)
     return error_response
-
